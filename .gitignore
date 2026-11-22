@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+logs/
+concepts/
+*.env
+secrets.*
+models/*
+!models/test-signal/
+models/test-signal/*
+!models/test-signal/test-signal.l2d
