@@ -15,3 +15,6 @@ models/*
 !models/test-signal/
 models/test-signal/*
 !models/test-signal/test-signal.l2d
+
+!models/nori/
+!models/nori/nori.l2d
