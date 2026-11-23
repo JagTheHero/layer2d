@@ -6,6 +6,8 @@ Self-contained offline toolkit for AI agents and developers to build, validate, 
 - `SKILL.md` — Full agent skill guide, `pack.json` contract, and hard-won rigging rules.
 - `l2d_tools.py` — Pure stdlib Python CLI (`pack`, `validate`, `inspect`, `unpack`).
 - `starter_builder.py` — Minimal runnable builder that creates a valid `starter.l2d` from scratch.
+- `polish_audit.py` — Automated attachment, partial-masking, bare-shoulder, neck-to-head, face/eye, side-of-face, body-motion & shoe-arch polish auditor (scores 0–100, renders annotated close-up sheet `polish_audit.png`, and writes a ready-to-paste AI fix prompt `polish_fix_prompt.txt` via `--prompt`).
+- `face3d.py` — Reusable 3D head-turn depth kit (`synthesize_side_jaw_layers`, `fit_side_jaw_3d`, `synthesize_turn_face_depth_layers`, `fit_turn_face_shade_3d`, `fit_turn_nose_3d`) for sleek side-of-jaw planes (`F01sL/R`), clipped rear-to-front directional cheek shading (`F02tR/L`), and sculpted 3/4 noses (`F03tR/L`) on every multi-sample rig.
 - `qa_runner.py` — Headless Playwright WebGL2 visual & runtime QA suite.
 - `player.html` — Unmodified standalone Layer2D WebGL2 Player used offline by `qa_runner.py`.
 
@@ -18,7 +20,10 @@ python3 starter_builder.py starter.l2d
 python3 l2d_tools.py validate starter.l2d
 python3 l2d_tools.py inspect starter.l2d
 
-# 3. Run offline WebGL2 runtime & visual QA (requires playwright + pillow)
+# 3. Audit model attachment polish + auto-generate a copy-paste AI fix prompt for any FAIL/WARN
+python3 polish_audit.py starter.l2d --out polish_out/ --prompt
+
+# 4. Run offline WebGL2 runtime & visual QA (requires playwright + pillow)
 python3 qa_runner.py starter.l2d --out qa_out/
 ```
 

@@ -33,6 +33,7 @@ from PIL import Image
 
 from rigkit.format import expected_texture_files, validate_l2d
 from rigkit.hair3d import detect_chroma_gaps
+from rigkit.polish import audit_model
 from rigkit.schema import load_avatar_spec
 
 FORBIDDEN_RELEASE_FILES = ("COST_LEDGER.json", "showcase_stage.html", "_stage_bg")
@@ -296,7 +297,7 @@ def check_webgl_runtime(viewer_dir: Path, *, check_hair_gaps: bool = True) -> di
     return {"ok": len(errors) == 0, "errors": errors, "metrics": metrics}
 
 
-def run_qa(model_dir: Path, *, skip_browser: bool = False) -> dict[str, Any]:
+def run_qa(model_dir: Path, *, skip_browser: bool = False, check_polish: bool = True) -> dict[str, Any]:
     model_dir = Path(model_dir)
     report: dict[str, Any] = {"model_dir": str(model_dir), "checks": {}}
 
@@ -309,6 +310,16 @@ def run_qa(model_dir: Path, *, skip_browser: bool = False) -> dict[str, Any]:
             report["checks"]["avatar_spec"] = {"ok": False, "errors": [str(exc)]}
 
     report["checks"]["pack_invariants"] = check_pack_invariants(model_dir / "viewer")
+    if check_polish and ((model_dir / "placed/layers.json").exists() or list(model_dir.glob("*.l2d"))):
+        p_rep = audit_model(model_dir, out_dir=model_dir / "review/polish", min_score=80.0)
+        report["checks"]["polish"] = {
+            "ok": p_rep["ok"],
+            "score": p_rep["score"],
+            "grade": p_rep["grade"],
+            "counts": p_rep["counts"],
+            "errors": [f"{f['title']}: {f['summary']}" for f in p_rep["findings"] if f["severity"] == "fail"],
+            "diagnostic_sheet": p_rep["diagnostic_sheet"],
+        }
     report["checks"]["release_hygiene"] = check_release_hygiene(model_dir)
     if not skip_browser:
         report["checks"]["webgl_runtime"] = check_webgl_runtime(model_dir / "viewer")

@@ -28,11 +28,12 @@ def paint_starter_textures() -> dict[str, tuple[bytes, int, int, float, float]]:
     d.rounded_rectangle((30, 30, 510, 650), radius=180, fill=(38, 42, 56, 255), outline=(20, 22, 30, 255), width=6)
     out["H01"] = (png_bytes(im), im.width, im.height, 600.0, 540.0)
 
-    # Torso (B01)
-    im = Image.new("RGBA", (420, 640), (0, 0, 0, 0))
+    # Torso + Neck (B01 — neck extends solidly behind F01 chin so head never floats!)
+    im = Image.new("RGBA", (420, 740), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    d.rounded_rectangle((40, 40, 380, 620), radius=90, fill=(28, 30, 38, 255), outline=(190, 30, 60, 255), width=6)
-    out["B01"] = (png_bytes(im), im.width, im.height, 600.0, 1080.0)
+    d.rounded_rectangle((162, 10, 258, 180), radius=24, fill=(248, 224, 214, 255), outline=(80, 60, 65, 255), width=4)
+    d.rounded_rectangle((40, 140, 380, 720), radius=90, fill=(28, 30, 38, 255), outline=(190, 30, 60, 255), width=6)
+    out["B01"] = (png_bytes(im), im.width, im.height, 600.0, 980.0)
 
     # Face base (F01 — clipTarget for eyes/blush/shadows)
     im = Image.new("RGBA", (360, 420), (0, 0, 0, 0))
@@ -124,9 +125,9 @@ def build_starter_l2d(out_path: Path) -> None:
         },
         "motion": {
             "sway": [3.2, 0.006, 0.011], "stepBounce": 4.0, "breath": [3.6, 0.0045],
-            "bodyFollow": [0.14, 0.28], "bounces": [[7.0, 7.5], 12.0, 0.12], "dur": 13.0,
+            "bodyFollow": [0.12, 0.25], "bodyFollowLR": [0.025, 0.025], "bounces": [[7.0, 7.5], 12.0, 0.12], "dur": 13.0,
             "earSoft": 5.0, "sew": 160.0,
-            "limit": {"bend": 0.28, "lift": 0.06, "earring": 0.6, "arm": 0.08},
+            "limit": {"bend": 0.25, "lift": 0.06, "earring": 0.6, "arm": 0.08},
             "lockSigma": 50.0, "lockLower": [1.5, 0.8, 3.0],
             "springs": {"skirt": [1.1, 0.25, 0.4, 4.0, 0.4], "armR": [0.9, 0.35, 0.7, 8.0, 0.0], "armL": [0.9, 0.35, 0.7, 8.0, 0.0]},
             "timeline": {"a": [[0, 0], [1.8, -0.8], [4.2, 0.8], [6.0, 0]], "roll": [[0, 0], [1.8, 3], [4.2, -3], [6.0, 0]]},
@@ -148,7 +149,7 @@ def build_starter_l2d(out_path: Path) -> None:
                 "Happy":   {"hide": [], "add": [], "move": {}, "eyes": [0.25, 0.25]},
                 "Wink":    {"hide": [], "add": [], "move": {}, "eyes": [1.0, 0.08]},
             },
-            "holds": {}, "raiseSleeves": {}, "eyes": {}, "blink": [2.8, 0.14],
+            "holds": {}, "raiseSleeves": {}, "eyes": {}, "blink": {"hide": [], "add": [], "drop": [], "squash": True},
             "faceTimeline": [], "holdTimeline": [], "vowels": {},
         },
         "hairTint": None, "eyeTint": None,

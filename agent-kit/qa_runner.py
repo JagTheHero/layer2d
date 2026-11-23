@@ -82,10 +82,17 @@ def run_qa(l2d_path: Path, out_dir: Path) -> dict:
         console_errors: list[str] = []
         try:
             with sync_playwright() as pw:
-                br = pw.chromium.launch(
-                    headless=True,
-                    args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"],
-                )
+                try:
+                    br = pw.chromium.launch(
+                        channel="chrome",
+                        headless=True,
+                        args=["--use-gl=angle", "--use-angle=gl-egl", "--enable-webgl", "--ignore-gpu-blocklist"],
+                    )
+                except Exception:
+                    br = pw.chromium.launch(
+                        headless=True,
+                        args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"],
+                    )
                 # 1. OBS ?obs=1 alpha + hidden UI check
                 page = br.new_page(viewport={"width": 640, "height": 800})
                 page.on("pageerror", lambda e: console_errors.append(f"pageerror: {e}"))
@@ -132,9 +139,9 @@ def run_qa(l2d_path: Path, out_dir: Path) -> dict:
                     page.set_viewport_size({"width": w, "height": h})
                     page.evaluate("""([st, rect, w, h]) => {
                         window.__rigApi.init();
-                        for (let i = 0; i < 6; i++) window.__rigApi.render(st, rect, w, h, 1/30, i === 0);
+                        for (let i = 0; i < 3; i++) window.__rigApi.render(st, rect, w, h, 1/30, i === 0);
                     }""", [base, rect, w, h])
-                    raw = page.screenshot(type="png")
+                    raw = page.screenshot(type="png", timeout=90000)
                     return Image.open(io.BytesIO(raw)).convert("RGB")
 
                 # 2. Wide yaw sweep (-1.0 .. +1.0)

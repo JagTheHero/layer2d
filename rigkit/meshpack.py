@@ -24,15 +24,16 @@ EYE_MODE = {"eye": 1, "iris": 3}
 EYE_COLS = 24
 
 PERFORMER = {
-    "sway": [3.2, 0.008, 0.011],
+    "sway": [3.2, 0.009, 0.012],
     "stepBounce": 4.0,
-    "breath": [3.6, 0.0045],
-    "bodyFollow": [0.14, 0.28],
+    "breath": [3.6, 0.004],
+    "bodyFollow": [0.12, 0.25],
+    "bodyFollowLR": [0.025, 0.025],
     "bounces": [[7.0, 7.5, 8.0], 14.0, 0.12],
     "dur": 13.0,
     "earSoft": 5.0,
     "sew": 160.0,
-    "limit": {"bend": 0.28, "lift": 0.06, "earring": 0.6, "arm": 0.08},
+    "limit": {"bend": 0.25, "lift": 0.06, "earring": 0.6, "arm": 0.08},
     "lockSigma": 50.0,
     "lockLower": [1.5, 0.8, 3.0],
     "springs": {
