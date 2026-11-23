@@ -104,8 +104,11 @@ def build_manifest(pack: dict[str, Any], meta: dict[str, Any] | None = None, has
         "canvas": list(pack.get("canvas", [2400, 4800])),
         "stats": {
             "layers": len(pack.get("layers", [])),
+            "nodes": len(pack.get("nodes", [])),
             "chains": len(pack.get("chains", [])),
             "samples": len(samples),
+            "pitchSamples": len(pack.get("pitchSamples", [])),
+            "blendShapes": len(pack.get("blendShapes", [])),
             "expressions": len(expr.get("faces", {})),
             "holds": len(expr.get("holds", {})),
             "outfits": len(pack.get("outfits", {})),
@@ -115,6 +118,9 @@ def build_manifest(pack: dict[str, Any], meta: dict[str, Any] | None = None, has
         "capabilities": {
             "headYawSamples": len(sample_angles),
             "headPitch2D": True,
+            "headPitchKeyforms": len(pack.get("pitchSamples", [])) > 0,
+            "blendShapeDeform": len(pack.get("blendShapes", [])) > 0,
+            "sceneGraph": len(pack.get("nodes", [])) > 0 or any(bool(L.get("parent")) for L in pack.get("layers", [])),
             "springChains": len(pack.get("chains", [])) > 0,
             "tailRig": bool(pack.get("tail")),
             "obsAlpha": True,
@@ -236,6 +242,35 @@ def validate_l2d(l2d_path: Path) -> dict[str, Any]:
         missing_tex = sorted(req_tex - name_set)
         if missing_tex:
             errors.append(f"Missing {len(missing_tex)} texture(s): {missing_tex[:5]}")
+
+        # Validate optional Scene Graph (`pack.nodes[]` and `parent` pointers: no missing refs or cycles)
+        scene_parents: dict[str, str | None] = {}
+        for nd in pack.get("nodes") or []:
+            nid = nd.get("id")
+            if not nid:
+                errors.append("Scene graph node missing required id")
+            elif nid in scene_parents:
+                errors.append(f"Duplicate scene graph node id: {nid}")
+            else:
+                scene_parents[nid] = nd.get("parent") or None
+        for L in pack.get("layers") or []:
+            lid = L.get("id")
+            if lid in scene_parents:
+                errors.append(f"Scene graph id collision between node and layer: {lid}")
+            elif lid:
+                scene_parents[lid] = L.get("parent") or None
+        for sid, pid in scene_parents.items():
+            if pid and pid not in scene_parents:
+                errors.append(f"Scene graph item {sid!r} references missing parent {pid!r}")
+                continue
+            seen = {sid}
+            cur = pid
+            while cur:
+                if cur in seen:
+                    errors.append(f"Scene graph cycle detected involving {sid!r}")
+                    break
+                seen.add(cur)
+                cur = scene_parents.get(cur)
 
         # Verify SHA-256 checksums for every non-checksum file
         checksums = json.loads(zf.read(CHECKSUMS_NAME).decode("utf-8"))
