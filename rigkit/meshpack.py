@@ -97,7 +97,7 @@ def build_pack(model_dir: Path, viewer_template: Path | None = None) -> dict:
 
     if viewer_template and viewer_template.exists():
         shutil.copy2(viewer_template, out / "index.html")
-        for sib in ("arm3d.js", "mouth_keyshape.js"):
+        for sib in ("arm3d.js", "mouth_keyshape.js", "mesh3d.js"):
             sib_p = viewer_template.parent / sib
             if sib_p.exists():
                 shutil.copy2(sib_p, out / sib)
