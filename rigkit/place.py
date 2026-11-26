@@ -208,7 +208,31 @@ def bake(model_dir: Path, *, layout_file: str = "layout.json", out_subdir: str =
             tex = bleed_rgb_edges(tex, solid_thresh=180, max_dist=10)
         tex.save(out_dir / f"{lid}.png")
 
-        skip_keys = {"cx", "cy", "w", "h", "rot", "cut", "cut_soft", "fade", "alpha", "warp", "warp_mode", "ink", "gain", "harden", "bleed", "lock_pose"}
+        hires_path = out_dir / f"{lid}_hires.png"
+        if L.get("hires_tex") and abs(r) < 1e-5 and not L.get("warp"):
+            # Preserve full native source resolution aligned 1:1 to trimmed canonical box [x0, y0, x1, y1]
+            # (prevents blocky/jagged upscaling when a rest-tucked layer expands 2-3x on turns!)
+            u0 = (x0 - (cx - pw * sx / 2.0)) / sx
+            v0 = (y0 - (cy - ph * sy / 2.0)) / sy
+            u1 = (x1 - (cx - pw * sx / 2.0)) / sx
+            v1 = (y1 - (cy - ph * sy / 2.0)) / sy
+            hr_w = max(tex.width, int(round(u1 - u0)))
+            hr_h = max(tex.height, int(round(v1 - v0)))
+            hr_pm = np.asarray(im, dtype=np.float32)
+            hr_pm[..., :3] *= hr_pm[..., 3:] / 255.0
+            hr_src = Image.fromarray(np.clip(hr_pm, 0, 255).round().astype(np.uint8), "RGBA")
+            hr_tr = hr_src.transform((hr_w, hr_h), Image.AFFINE, ((u1 - u0) / hr_w, 0.0, u0, 0.0, (v1 - v0) / hr_h, v0), Image.BICUBIC)
+            hr_a = np.asarray(hr_tr, dtype=np.float32)
+            ha = hr_a[..., 3:]
+            hr_a[..., :3] = np.where(ha > 1.0, hr_a[..., :3] / np.maximum(ha, 1.0) * 255.0, 0.0)
+            hr_im = Image.fromarray(np.clip(hr_a, 0, 255).round().astype(np.uint8), "RGBA")
+            if L.get("bleed", True):
+                hr_im = bleed_rgb_edges(hr_im, solid_thresh=140, max_dist=10)
+            hr_im.save(hires_path)
+        elif hires_path.exists():
+            hires_path.unlink()
+
+        skip_keys = {"cx", "cy", "w", "h", "rot", "cut", "cut_soft", "fade", "alpha", "warp", "warp_mode", "ink", "gain", "harden", "bleed", "lock_pose", "hires_tex"}
         entry = {k: v for k, v in L.items() if k not in skip_keys}
         entry["box"] = [int(x0), int(y0), int(x1), int(y1)]
         entry["sheer"] = bool(L.get("sheer", False))

@@ -9,7 +9,7 @@
  *   - Interactive spring-chain impulse/wind/gravity physics preview
  */
 
-import { VS, FS } from "./shaders.js";
+import { VS, FS, SHADOW_VS, SHADOW_FS } from "./shaders.js";
 import {
   inv2,
   sampleD,
@@ -26,6 +26,7 @@ import {
   applySceneGraphToKey,
   getDescendants,
 } from "./scene_graph.js";
+import { t } from "./i18n_bridge.js";
 
 const DEFAULT_VOWELS = { A: "M04", I: "M05", U: "M06", E: "M07", O: "M08" };
 const LID = [0.4, 0.15];
@@ -62,7 +63,7 @@ export class Layer2DEngine {
       antialias: false,
       preserveDrawingBuffer: true,
     });
-    if (!this.gl) throw new Error("WebGL2 is required for Layer2D Studio.");
+    if (!this.gl) throw new Error(t("err.noWebgl2", null, "WebGL2 is required for Layer2D Studio."));
 
     this.prog = null;
     this.U = {};
@@ -77,6 +78,10 @@ export class Layer2DEngine {
     this._eyeCache = new WeakMap();       // cached Float32Array eye profiles (keeps pack pure JSON)
     this.clipFbo = Object.create(null);
     this.clipOrder = [];
+    this.shadowProg = null;
+    this.SU = Object.create(null);
+    this.shadowFbo = [];
+    this.shadowRecvFbo = [];
     this.skirtTex = null;
     this.lockTex = null;
     this.lockRows = null;
@@ -99,6 +104,8 @@ export class Layer2DEngine {
     this.fboH = 0;
     this._offFbo = null;
     this._offCanvas = null;
+    this.km = null;
+    this._kmLastT = 0;
     this.ready = false;
 
     // Physics preview tuning overrides (from Studio Physics / Animate panels)
@@ -146,6 +153,20 @@ export class Layer2DEngine {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    this.shadowProg = gl.createProgram();
+    gl.attachShader(this.shadowProg, this._compile(gl.VERTEX_SHADER, SHADOW_VS));
+    gl.attachShader(this.shadowProg, this._compile(gl.FRAGMENT_SHADER, SHADOW_FS));
+    gl.bindAttribLocation(this.shadowProg, 0, "aPos");
+    gl.linkProgram(this.shadowProg);
+    if (!gl.getProgramParameter(this.shadowProg, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(this.shadowProg));
+    }
+    const nSU = gl.getProgramParameter(this.shadowProg, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < nSU; i++) {
+      const info = gl.getActiveUniform(this.shadowProg, i);
+      this.SU[info.name] = gl.getUniformLocation(this.shadowProg, info.name);
+    }
+    if (window.Layer2DKeyMouth) this.km = window.Layer2DKeyMouth.createKeyMouth(gl);
   }
 
   _uploadTex(im, mip = true) {
@@ -199,6 +220,13 @@ export class Layer2DEngine {
       gl.deleteFramebuffer(this.clipFbo[k].fb);
       delete this.clipFbo[k];
     }
+    for (const fb of [...this.shadowFbo, ...this.shadowRecvFbo]) {
+      if (!fb) continue;
+      gl.deleteTexture(fb.tex);
+      gl.deleteFramebuffer(fb.fb);
+    }
+    this.shadowFbo = [];
+    this.shadowRecvFbo = [];
 
     this.P = pack;
     this.simT = 0;
@@ -252,6 +280,10 @@ export class Layer2DEngine {
     }));
 
     this.syncPack();
+    const initKmMode = (window.Layer2DKeyMouth && window.Layer2DKeyMouth.resolveMode)
+      ? window.Layer2DKeyMouth.resolveMode("pack", pack)
+      : null;
+    if (this.km && initKmMode) await this.km.whenReady(initKmMode);
     this.ready = true;
   }
 
@@ -332,12 +364,18 @@ export class Layer2DEngine {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-    // Rebuild clipFbo + topological order (every layer referenced by clip or behind needs an FBO!)
+    // Rebuild clipFbo + topological order (every layer referenced by clip, behind, or outfit clipMask needs an FBO!)
     const neededClip = new Set();
     for (const L of P.layers) {
       if (L.clipTarget) neededClip.add(L.id);
       if (L.clip) neededClip.add(L.clip);
       if (Array.isArray(L.behind)) { for (const b of L.behind) if (b) neededClip.add(b); }
+    }
+    for (const o of Object.values(P.outfits || {})) {
+      if (o && o.clipMask && o.clipMask.target) neededClip.add(o.clipMask.target);
+    }
+    for (const sh of (P.shadows || [])) {
+      if ((sh.receivers || []).length === 1) neededClip.add(sh.receivers[0]);
     }
     for (const id of Object.keys(this.clipFbo)) {
       if (!neededClip.has(id)) {
@@ -354,12 +392,38 @@ export class Layer2DEngine {
         gl.bindTexture(gl.TEXTURE_2D, t);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fw, fh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
         const fb = gl.createFramebuffer();
         gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
         this.clipFbo[id] = { tex: t, fb };
       }
+    }
+    for (const fb of [...this.shadowFbo, ...this.shadowRecvFbo]) {
+      if (!fb) continue;
+      gl.deleteTexture(fb.tex);
+      gl.deleteFramebuffer(fb.fb);
+    }
+    this.shadowFbo = [];
+    this.shadowRecvFbo = [];
+    const mkShadowFbo = () => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fw, fh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return { tex: t, fb };
+    };
+    for (let si = 0; si < (P.shadows || []).length; si++) {
+      this.shadowFbo[si] = mkShadowFbo();
+      this.shadowRecvFbo[si] = ((P.shadows[si].receivers || []).length > 1) ? mkShadowFbo() : null;
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
@@ -420,6 +484,11 @@ export class Layer2DEngine {
     this.fboW = W;
     this.fboH = H;
     for (const fb of Object.values(this.clipFbo)) {
+      gl.bindTexture(gl.TEXTURE_2D, fb.tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    for (const fb of [...this.shadowFbo, ...this.shadowRecvFbo]) {
+      if (!fb) continue;
       gl.bindTexture(gl.TEXTURE_2D, fb.tex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
@@ -490,14 +559,17 @@ export class Layer2DEngine {
   /* ---------- Exact 1:1 Shader Coordinate Transforms (Layer Space <-> Screen Canonical Space) ---------- */
   _buildMotionState(params) {
     const P = this.P;
+    const aVal = params.a || 0;
+    const bfLR = P?.motion?.bodyFollowLR;
+    const bf = bfLR ? bfLR[aVal < 0 ? 0 : 1] : ((P?.motion?.bodyFollow && P.motion.bodyFollow[0]) || 0);
     return {
-      a: params.a || 0,
+      a: aVal,
       pitch: params.pitch || 0,
       roll: params.roll || 0,
       sway: params.bodySway || 0,
       lean: params.bodyLean || 0,
       breath: 1.0 + (params.breath || 0),
-      body: (params.a || 0) * ((P?.motion?.bodyFollow && P.motion.bodyFollow[0]) || 0),
+      body: aVal * bf,
       bounce: 0,
       tailWag: params.tailWag ?? 1.0,
       tailPhaseOffset: params.tailSway || 0,
@@ -746,6 +818,16 @@ export class Layer2DEngine {
       p = this._cylInv(p, L, k, fr.key);
     }
 
+    const tb = MM.turnBody;
+    if (!L.head && tb && m.a) {
+      const tbs = tb[m.a < 0 ? "R" : "L"] || [0, 0];
+      const tbx = tbs[0] * Math.abs(m.a), tby = tbs[1] * Math.abs(m.a);
+      if (tbx || tby) {
+        const f = tb.fade ? (1 - this._smoothstep(tb.fade[0], tb.fade[1], p[1])) : 1;
+        p = [p[0] - tbx * f, p[1] - tby * f];
+      }
+    }
+
     if (L.chains && L.chains.length && this.CH.length && this.physics.enabled) {
       const sh = this._chainShiftAt(p, L);
       p = [p[0] - sh[0], p[1] - sh[1]];
@@ -774,6 +856,22 @@ export class Layer2DEngine {
         q = [p[0] + sh[0], p[1] + sh[1]];
       }
       p = q;
+    }
+
+    // 1.5. Forward turnBody slide (inverse of shaders.js p -= uTurnBody * (1 - smoothstep(fade)))
+    const tb = MM.turnBody;
+    if (!L.head && tb && m.a) {
+      const tbs = tb[m.a < 0 ? "R" : "L"] || [0, 0];
+      const tbx = tbs[0] * Math.abs(m.a), tby = tbs[1] * Math.abs(m.a);
+      if (tbx || tby) {
+        let qy = p[1];
+        for (let it = 0; it < 4; it++) {
+          const f = tb.fade ? (1 - this._smoothstep(tb.fade[0], tb.fade[1], qy)) : 1;
+          qy = p[1] + tby * f;
+        }
+        const f = tb.fade ? (1 - this._smoothstep(tb.fade[0], tb.fade[1], qy)) : 1;
+        p = [p[0] + tbx * f, qy];
+      }
     }
 
     // 2. Forward head cylinder turn + pitch
@@ -1133,7 +1231,26 @@ export class Layer2DEngine {
       add = add.concat(Hd.add || []);
     }
     const vw = params.vowel;
-    if (vw) {
+    const mouthMode = (params && params.mouthMode) || "pack";
+    const m01 = P.layers && P.layers.find((L) => L.id === "M01" || /^M\d/.test(L.id));
+    const kmMode = (window.Layer2DKeyMouth && window.Layer2DKeyMouth.resolveMode)
+      ? window.Layer2DKeyMouth.resolveMode(mouthMode, P)
+      : (mouthMode !== "pack" ? mouthMode : null);
+    if (kmMode && this.km) this.km.ensurePreset(kmMode);
+    const useKeyMouth = !!(kmMode && this.km && m01 && this.km.isReady(kmMode));
+    if (useKeyMouth) {
+      hide.add(m01.id);
+      for (const L of P.layers) {
+        if (/^M\d/.test(L.id)) hide.add(L.id);
+      }
+      if (Array.isArray(X.vowelHide)) {
+        for (const h of X.vowelHide) hide.add(h);
+      }
+      add = add.filter((pid) => {
+        const ap = X.pieces && X.pieces[pid];
+        return !ap || (ap.base !== m01.id && !/^M\d/.test(pid));
+      });
+    } else if (vw) {
       const map = X.vowels || DEFAULT_VOWELS;
       const vid = map[String(vw).toUpperCase()];
       const pc = vid && X.pieces && X.pieces[vid];
@@ -1210,6 +1327,10 @@ export class Layer2DEngine {
       eyes: eyeArr,
       gaze: F.look || [params.gazeX ?? (params.eyeX || 0) * 7, params.gazeY ?? (params.eyeY || 0) * 3],
       over: (Hd && Hd.over) || {},
+      useKeyMouth,
+      mouthMode: kmMode || mouthMode,
+      faceName: name,
+      keyMouthLayer: m01 || null,
     };
   }
 
@@ -1322,9 +1443,24 @@ export class Layer2DEngine {
     gl.uniform2f(U.uFlare, 0, 0);
     gl.uniform1f(U.uDrop, 0);
     gl.uniform2f(U.uSkirtP, 0, 0);
-    gl.uniform2f(U.uTurnBody, 0, 0);
-    gl.uniform1i(U.uTurnN, 0);
-    gl.uniform1f(U.uHeadRide, 0);
+    const tb = MM.turnBody, tbs = tb ? (tb[m.a < 0 ? "R" : "L"] || [0, 0]) : [0, 0];
+    gl.uniform2f(U.uTurnBody, tbs[0] * Math.abs(m.a), tbs[1] * Math.abs(m.a));
+    if (tb && tb.fade) gl.uniform2f(U.uTurnFade, tb.fade[0], tb.fade[1]);
+    const TC = MM.turnChain;
+    if (TC && TC.joints && TC.joints.length) {
+      const turn = P.head?.turn || { R: -0.22, L: 0.22 };
+      const hAng = Math.abs(m.a) * (m.a < 0 ? turn.R : turn.L);
+      const ct = TC.joints.map((j) => (j[2] || 0) * hAng);
+      gl.uniform1i(U.uTurnN, Math.min(8, ct.length));
+      gl.uniform1f(U.uTurnR, TC.r || MM.bodyR);
+      gl.uniform2fv(U.uTurnJ, TC.joints.slice(0, 8).flatMap((j, i) => [j[1], ct[i]]));
+      const ft = TC.foot || [MM.footY, 0];
+      gl.uniform2f(U.uFootTurn, ft[0], ft[1] * ct[ct.length - 1]);
+      gl.uniform1f(U.uHeadRide, TC.head ? (P.head?.pivot?.[1] || 0) : 0);
+    } else {
+      gl.uniform1i(U.uTurnN, 0);
+      gl.uniform1f(U.uHeadRide, 0);
+    }
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.skirtTex);
     gl.uniform1i(U.uSkirt, 3);
@@ -1364,6 +1500,21 @@ export class Layer2DEngine {
     }
     const eyes = this._eyeState(fc.eyes, fc.gaze);
     const after = { ...fc.after };
+    if (fc.useKeyMouth && this.km && fc.keyMouthLayer) {
+      const nowSec = performance.now() / 1000;
+      const kmDt = this._kmLastT ? Math.min(0.05, Math.max(0.001, nowSec - this._kmLastT)) : 1 / 60;
+      this._kmLastT = nowSec;
+      const kmCfg = P.keyMouth || null;
+      this.km.stepAndDraw(fc.mouthMode, {
+        faceName: fc.faceName,
+        faceMap: kmCfg && kmCfg.faceMap,
+        sharp: kmCfg && kmCfg.sharp,
+        vowel: params.vowel || null,
+        volume: params.micVolume,
+      }, kmDt);
+      const kmBase = fc.keyMouthLayer.id;
+      (after[kmBase] = [...(after[kmBase] || [])]).push(this.km.makePiece(fc.keyMouthLayer, "__keymouth__", kmCfg));
+    }
     for (const s of ["R", "L"]) {
       const id = "E09" + s, b = "E05" + s;
       if (eyes[s] && eyes[s].fade > 0 && P.expr.pieces && P.expr.pieces[id] && !fc.hide.has(b)) {
@@ -1371,11 +1522,17 @@ export class Layer2DEngine {
       }
     }
 
-    // Outfit wear visibility
+    // Outfit wear visibility (+ conditional clip / reverse-mask bindings)
     const sleeveOp = Object.create(null);
+    const outfitClip = Object.create(null);
+    const outfitClipActive = new Set();
     const wear = params.wear || {};
     for (const [g, o] of Object.entries(P.outfits || {})) {
       const w = g in wear ? wear[g] : (o.default === false ? 0 : 1);
+      if (o.clipMask && w > 0.001 && this.clipFbo[o.clipMask.target]) {
+        outfitClipActive.add(o.clipMask.target);
+        for (const lid of o.clipMask.layers || []) outfitClip[lid] = { target: o.clipMask.target, invert: !!o.clipMask.invert, mix: w };
+      }
       if (w >= 1) continue;
       for (const id of o.hide || []) sleeveOp[id] = (sleeveOp[id] ?? 1) * w;
     }
@@ -1388,12 +1545,13 @@ export class Layer2DEngine {
       return true;
     };
 
-    const drawLayer = (i, alphaOnly, move, piece) => {
+    const drawLayer = (i, alphaOnly, move, piece, useOutfitClip = false) => {
       const L = P.layers[i], k = key.layers[i];
       if (!L || !k) return false;
       const tid = piece ? "expr_" + piece.id : L.id;
-      if (!this.tex[tid]) return false;
-      const effOp = (piece ? (piece.op ?? 1) : k.op * (sleeveOp[L.id] ?? 1)) * (alphaOnly ? 1 : passOp);
+      const texObj = (piece && piece.id === "__keymouth__" && this.km) ? this.km.outTex : this.tex[tid];
+      if (!texObj) return false;
+      const effOp = (piece ? (piece.op ?? 1) : k.op * (alphaOnly && !useOutfitClip && outfitClipActive.has(L.id) ? 1 : (sleeveOp[L.id] ?? 1))) * (alphaOnly ? 1 : passOp);
       if (effOp <= 0.0005 || (k.wipe ?? 1) <= 0.0005) return false;
 
       const ey = L.eye && !(piece && L.eye.mode % 3 === 2) ? eyes[L.eye.side] : null;
@@ -1585,7 +1743,7 @@ export class Layer2DEngine {
       }
 
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.tex[tid]);
+      gl.bindTexture(gl.TEXTURE_2D, texObj);
       gl.uniform1i(U.uTex, 0);
       if (L.hole && !piece && this.holes[L.id]) {
         gl.uniform1i(U.uHasHole, 1);
@@ -1606,13 +1764,22 @@ export class Layer2DEngine {
       } else {
         gl.uniform1i(U.uHasWipe, 0);
       }
+      const oc = (!alphaOnly || useOutfitClip) ? outfitClip[L.id] : null;
       if (L.clip && this.clipFbo[L.clip] && (!alphaOnly || L.clip !== L.id)) {
-        gl.uniform1i(U.uClipOn, 1);
+        gl.uniform1i(U.uClipOn, L.clipInvert ? 2 : 1);
+        gl.uniform1f(U.uClipMix, 1.0);
         gl.activeTexture(gl.TEXTURE2);
         gl.bindTexture(gl.TEXTURE_2D, this.clipFbo[L.clip].tex);
         gl.uniform1i(U.uClip, 2);
+      } else if (oc && this.clipFbo[oc.target] && oc.target !== L.id) {
+        gl.uniform1i(U.uClipOn, oc.invert ? 2 : 1);
+        gl.uniform1f(U.uClipMix, oc.mix);
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, this.clipFbo[oc.target].tex);
+        gl.uniform1i(U.uClip, 2);
       } else {
         gl.uniform1i(U.uClipOn, 0);
+        gl.uniform1f(U.uClipMix, 0.0);
       }
       if (L.behind && !alphaOnly && !piece && (k.behind || 0) >= 0.5 && this.clipFbo[L.behind[0]] && this.clipFbo[L.behind[1]]) {
         gl.uniform1f(U.uBehind, 1.0);
@@ -1647,11 +1814,80 @@ export class Layer2DEngine {
       gl.viewport(0, 0, W, H);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      if (isVisible(id)) {
+      const clipVis = isVisible(id) || (outfitClipActive.has(id) && !(soloId && id !== soloId) && !(hiddenIds && hiddenIds.has(id)) && !fc.hide.has(id));
+      if (clipVis) {
         const idx = P.lidx[id];
         if (idx !== undefined) drawLayer(idx, true, fc.move[id], null);
       }
     }
+
+    // 1.5. Render real-time cast-shadow caster & multi-receiver alpha FBOs
+    const shadows = P.shadows || [], shadowActive = [], shadowsAfter = Object.create(null);
+    if (shadows.length && this.shadowProg && passOp >= 0.99) {
+      for (let si = 0; si < shadows.length; si++) {
+        const sh = shadows[si], cfb = this.shadowFbo[si];
+        if (!cfb) continue;
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, cfb.fb);
+        gl.viewport(0, 0, W, H);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        let drawn = 0;
+        for (const cid of sh.casters || []) {
+          if (!isVisible(cid)) continue;
+          const idx = P.lidx[cid];
+          if (idx !== undefined && drawLayer(idx, true, fc.move[cid], null, true)) drawn++;
+        }
+        if (!drawn) { shadowActive[si] = false; continue; }
+        const rlist = sh.receivers || [];
+        if (rlist.length > 1 && this.shadowRecvFbo[si]) {
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, null);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowRecvFbo[si].fb);
+          gl.viewport(0, 0, W, H);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          let rdrawn = 0;
+          for (const rid of rlist) {
+            if (!isVisible(rid)) continue;
+            const idx = P.lidx[rid];
+            if (idx !== undefined && drawLayer(idx, true, fc.move[rid], null, true)) rdrawn++;
+          }
+          if (!rdrawn) { shadowActive[si] = false; continue; }
+        }
+        shadowActive[si] = true;
+        const anchor = sh.after || rlist[rlist.length - 1];
+        if (anchor) (shadowsAfter[anchor] ||= []).push([si, sh]);
+      }
+    }
+    const drawShadow = (si, sh) => {
+      if (!shadowActive[si] || !this.shadowProg) return;
+      const rlist = sh.receivers || [];
+      const rtex = rlist.length === 1 ? (this.clipFbo[rlist[0]] && this.clipFbo[rlist[0]].tex) : (this.shadowRecvFbo[si] && this.shadowRecvFbo[si].tex);
+      if (!rtex) return;
+      const sxCan = W / Math.max(1e-4, vw[2] - vw[0]);
+      const syCan = H / Math.max(1e-4, vw[3] - vw[1]);
+      const dxCan = (sh.offset?.[0] || 0) + (sh.yawOffset?.[0] || 0) * (m.a || 0) + (sh.pitchOffset?.[0] || 0) * (m.pitch || 0);
+      const dyCan = (sh.offset?.[1] || 0) + (sh.yawOffset?.[1] || 0) * (m.a || 0) + (sh.pitchOffset?.[1] || 0) * (m.pitch || 0);
+      const soft = sh.soft || 0;
+      const SU = this.SU;
+      gl.useProgram(this.shadowProg);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.shadowFbo[si].tex); gl.uniform1i(SU.uCaster, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, rtex); gl.uniform1i(SU.uRecv, 1);
+      gl.uniform2f(SU.uOffsetUv, -dxCan * sxCan / W, dyCan * syCan / H);
+      gl.uniform2f(SU.uBlurUv, soft * sxCan / W, soft * syCan / H);
+      const col = sh.color || [0.68, 0.63, 0.58];
+      gl.uniform3f(SU.uColor, col[0], col[1], col[2]);
+      gl.uniform1f(SU.uOpacity, sh.opacity ?? 0.85);
+      gl.uniform1f(SU.uSharp, sh.sharp ?? 0.0);
+      gl.blendFuncSeparate(gl.DST_COLOR, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(this.prog);
+    };
 
     // 2. Render visible layers onto destination framebuffer (screen or offscreen FBO)
     gl.activeTexture(gl.TEXTURE2);
@@ -1676,6 +1912,7 @@ export class Layer2DEngine {
       for (const j of overAt[id] || []) {
         if (isVisible(P.layers[j].id)) drawLayer(j, false, fc.move[P.layers[j].id], null);
       }
+      for (const [si, sh] of shadowsAfter[id] || []) drawShadow(si, sh);
     }
   }
 
@@ -1787,6 +2024,11 @@ export class Layer2DEngine {
   _resizeClipFbosOnly(w, h) {
     const gl = this.gl;
     for (const fb of Object.values(this.clipFbo)) {
+      gl.bindTexture(gl.TEXTURE_2D, fb.tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    for (const fb of [...this.shadowFbo, ...this.shadowRecvFbo]) {
+      if (!fb) continue;
       gl.bindTexture(gl.TEXTURE_2D, fb.tex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }

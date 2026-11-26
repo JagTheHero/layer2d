@@ -97,6 +97,10 @@ def build_pack(model_dir: Path, viewer_template: Path | None = None) -> dict:
 
     if viewer_template and viewer_template.exists():
         shutil.copy2(viewer_template, out / "index.html")
+        for sib in ("arm3d.js", "mouth_keyshape.js"):
+            sib_p = viewer_template.parent / sib
+            if sib_p.exists():
+                shutil.copy2(sib_p, out / sib)
 
     meta = json.loads((placed / "layers.json").read_text())
     # Only include active/toggleable rig layers (skip PSD-only hidden swap parts if tagged `psd_only: true`)
@@ -117,7 +121,8 @@ def build_pack(model_dir: Path, viewer_template: Path | None = None) -> dict:
 
     for L in active_meta:
         lid = L["id"]
-        im = Image.open(placed / f"{lid}.png").convert("RGBA")
+        hires_p = placed / f"{lid}_hires.png"
+        im = Image.open(hires_p if hires_p.exists() else placed / f"{lid}.png").convert("RGBA")
         im.save(tex_dir / f"{lid}.webp", quality=93, method=5, alpha_quality=100)
         x0, y0, x1, y1 = L["box"]
         kind = kind_of(L)
@@ -306,6 +311,8 @@ def build_pack(model_dir: Path, viewer_template: Path | None = None) -> dict:
         pack["highlightIds"] = rig["highlightIds"]
     if "pitchGroups" in rig:
         pack["pitchGroups"] = rig["pitchGroups"]
+    if "shadows" in rig:
+        pack["shadows"] = rig["shadows"]
 
     (out / "pack.json").write_text(json.dumps(pack, separators=(",", ":")))
     tex_mb = sum(f.stat().st_size for f in tex_dir.iterdir() if f.is_file()) / 1e6

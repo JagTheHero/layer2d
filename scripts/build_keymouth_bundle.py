@@ -219,7 +219,6 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
           gl.bindTexture(gl.TEXTURE_2D, prevTex);
           entry.ready = true;
           loadedCount++;
-          setObj.ready = loadedCount >= totalCount;
         };
         pending.push([im, "data:image/png;base64," + km.png]);
       }
@@ -242,28 +241,64 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
         K, names, N, W, exW,
         cur: { xa: K.closed.xa, xb: K.closed.xb, U: new Float32Array(N), Lo: new Float32Array(N) },
         ready: false,
+        _waiters: [],
+      };
+      setObj._checkReady = () => {
+        if (loadedCount >= totalCount && !setObj.ready) {
+          setObj.ready = true;
+          const ws = setObj._waiters.splice(0);
+          for (const fn of ws) fn(setObj);
+        }
       };
       sets[presetName] = setObj;
-      for (const [im, dataUrl] of pending) im.src = dataUrl;
+      for (const [im, dataUrl] of pending) {
+        const origOnload = im.onload;
+        im.onload = () => { origOnload(); setObj._checkReady(); };
+        im.onerror = () => { loadedCount++; setObj._checkReady(); };
+        im.src = dataUrl;
+      }
       return setObj;
     }
 
+    function resolvePresetName(mode) {
+      if (!mode || mode === "pack") return null;
+      const s = String(mode).trim().toLowerCase();
+      if (PRESETS[s]) return s;
+      if (s === "keyshape_fang") return "chiwa";
+      if (s === "keyshape_male") return "male";
+      if (s === "keyshape") return "kurage02";
+      return null;
+    }
+
     function ensurePreset(mode) {
-      const pname = mode === "keyshape_fang" ? "chiwa" : "kurage02";
+      const pname = resolvePresetName(mode);
+      if (!pname) return null;
       if (!sets[pname]) buildPreset(pname);
       activePreset = sets[pname];
       return activePreset;
     }
 
+    function whenReady(mode) {
+      const S = ensurePreset(mode);
+      if (!S) return Promise.resolve(null);
+      if (S.ready) return Promise.resolve(S);
+      return new Promise((resolve) => { S._waiters.push(resolve); });
+    }
+
     function stepAndDraw(mode, input, dt) {
       const S = ensurePreset(mode);
       if (!S || !S.ready) return null;
-      const safeDt = clamp(dt || 0.016, 0.001, 0.1);
+      const snap = !!(input && input.snap);
+      const safeDt = clamp(dt || 0.016, 0.001, 0.25);
       const { K, names, N, W, exW, cur } = S;
 
-      // 1. Base expression weights (smoothed at 13/s)
-      const em = (input && input.exprWeights) || mapFaceNameToMouth(input && input.faceName);
-      const ke = 1 - Math.exp(-safeDt * 13);
+      // 1. Base expression weights (explicit pack faceMap > exprWeights > regex mapFaceNameToMouth)
+      const fMap = input && input.faceMap;
+      const em = (input && input.exprWeights)
+        || (fMap && input.faceName && fMap[input.faceName])
+        || (fMap && !input.faceName && fMap.Neutral)
+        || mapFaceNameToMouth(input && input.faceName);
+      const ke = snap ? 1.0 : (1 - Math.exp(-safeDt * 13));
       let se = 0;
       const kmT = Object.create(null);
       for (const nm of names) {
@@ -276,7 +311,7 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
       const hasProbs = input && input.probs && typeof input.probs === "object";
       const rawVol = clamp((input && typeof input.volume === "number") ? input.volume : 0, 0, 1);
       const envTc = rawVol > volEnv ? 0.03 : 0.075;
-      volEnv += (rawVol - volEnv) * (1 - Math.exp(-safeDt / envTc));
+      volEnv = snap ? rawVol : (volEnv + (rawVol - volEnv) * (1 - Math.exp(-safeDt / envTc)));
 
       let speechApplied = false;
       if (hasProbs && input.open) {
@@ -350,7 +385,7 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
       // 3. Smoothly step weights W[nm] (30/s) and normalize
       let sTarget = 0;
       for (const nm of names) sTarget += Math.max(kmT[nm] || 0, 0);
-      const kw = 1 - Math.exp(-safeDt * 30);
+      const kw = snap ? 1.0 : (1 - Math.exp(-safeDt * 30));
       let sw = 0;
       for (const nm of names) {
         const tg = sTarget > 1e-4 ? Math.max(kmT[nm] || 0, 0) / sTarget : (nm === "closed" ? 1 : 0);
@@ -382,16 +417,17 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
       }
       if (wl <= 1e-4 && wo > 1e-4) for (const nm of names) if (K[nm].open) K[nm].wi = W[nm] / wo;
       if (wo <= 1e-4) for (const nm of names) if (!K[nm].open) K[nm].wi = W[nm] / (wl || 1);
-      if (S.sharp > 0) {
+      const sharp = (input && typeof input.sharp === "number") ? input.sharp : S.sharp;
+      if (sharp > 0) {
         let so = 0, sp = 0;
         for (const nm of names) {
           const q = K[nm];
-          if (q.open && q.wi > 0) { so += q.wi; sp += Math.pow(q.wi, S.sharp); }
+          if (q.open && q.wi > 0) { so += q.wi; sp += Math.pow(q.wi, sharp); }
         }
         if (sp > 0) {
           for (const nm of names) {
             const q = K[nm];
-            if (q.open && q.wi > 0) q.wi = so * Math.pow(q.wi, S.sharp) / sp;
+            if (q.open && q.wi > 0) q.wi = so * Math.pow(q.wi, sharp) / sp;
           }
         }
       }
@@ -462,19 +498,23 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
       return outTex;
     }
 
-    function makePiece(m01Layer, id) {
+    function makePiece(m01Layer, id, opts) {
       const mw = Math.max(24, (m01Layer && m01Layer.w) || 90);
-      // M01 textures include transparent padding around the drawn mouth (~34%), so target ~0.66 * M01.w
-      const scale = REF_CLOSED_W / (mw * 0.66);
-      // Align the closed-mouth center (OUT_CX, OUT_CY) onto M01's center (0, 0).
-      const relTy = OUT_CY - OUT_H * 0.5;
+      const targetW = (opts && typeof opts.width === "number" && opts.width > 8) ? opts.width : (mw * 0.66);
+      const mult = (opts && typeof opts.scale === "number" && opts.scale > 0.1) ? opts.scale : 1.0;
+      const scale = REF_CLOSED_W / Math.max(16, targetW * mult);
+      const ox = (opts && Array.isArray(opts.offset) && opts.offset[0]) || 0;
+      const oy = (opts && Array.isArray(opts.offset) && opts.offset[1]) || 0;
+      // Align the closed-mouth center (OUT_CX, OUT_CY) onto M01's center (0, 0) + optional canvas-px offset.
+      const relTx = -ox * scale;
+      const relTy = (OUT_CY - OUT_H * 0.5) - oy * scale;
       return {
         id: id || "__keymouth__",
         base: (m01Layer && m01Layer.id) || "M01",
         w: OUT_W,
         h: OUT_H,
         relA: [scale, 0, 0, scale],
-        relT: [0, relTy],
+        relT: [relTx, relTy],
         op: 1,
         reveal: 1,
       };
@@ -498,22 +538,28 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
     return {
       outTex,
       ensurePreset,
+      whenReady,
       stepAndDraw,
       makePiece,
       dispose,
       isReady: (mode) => {
-        const pname = mode === "keyshape_fang" ? "chiwa" : "kurage02";
-        return !!(sets[pname] && sets[pname].ready);
+        const pname = resolvePresetName(mode);
+        return !!(pname && sets[pname] && sets[pname].ready);
       },
     };
   }
 
   const api = {
-    MODES: ["pack", "keyshape", "keyshape_fang"],
-    LABELS: { pack: "Mouth: Pack", keyshape: "Mouth: Keyshape", keyshape_fang: "Mouth: Fang" },
+    MODES: ["pack", "keyshape_male", "keyshape", "keyshape_fang"],
+    LABELS: { pack: "Mouth: Pack", keyshape_male: "Mouth: Male", keyshape: "Mouth: Keyshape", keyshape_fang: "Mouth: Fang" },
     normalizeMode(m) {
       const s = String(m || "").trim().toLowerCase();
       return api.MODES.includes(s) ? s : "pack";
+    },
+    resolveMode(mouthMode, pack) {
+      if (mouthMode && mouthMode !== "pack") return mouthMode;
+      if (pack && pack.keyMouth && pack.keyMouth.preset) return pack.keyMouth.preset;
+      return null;
     },
     createKeyMouth,
     mapFaceNameToMouth,
@@ -526,8 +572,10 @@ RUNTIME_JS = r'''/* Layer2D Key-Shape Contour-Warped Mouth Engine (WebGL2)
 
 def main() -> None:
     presets = {}
-    for model_name in ("kurage02", "chiwa"):
+    for model_name in ("kurage02", "chiwa", "male"):
         d = ASSETS / model_name
+        if not (d / "meta.json").exists():
+            continue
         meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
         out_keys = {}
         for k in KEYS:
